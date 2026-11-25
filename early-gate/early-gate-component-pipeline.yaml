@@ -630,6 +630,35 @@ spec:
           #!/bin/bash
           set -euo pipefail
 
+          # Retry wrapper for GitHub API calls. Retries on 5xx and transient
+          # network errors; does NOT retry 4xx (auth/validation).
+          # Usage: HTTP_CODE=$(retry_github_api <max> <delay> curl ...)
+          retry_github_api() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local http_code="" curl_exit=0
+            while true; do
+              http_code=$("$@") && curl_exit=0 || curl_exit=$?
+              if [ "${curl_exit}" -ne 0 ]; then
+                echo "curl failed (exit ${curl_exit}), attempt ${attempt}/${max_attempts}" >&2
+              elif [ "${http_code}" -ge 500 ] 2>/dev/null && [ "${http_code}" -lt 600 ] 2>/dev/null; then
+                echo "GitHub API returned HTTP ${http_code}, attempt ${attempt}/${max_attempts}" >&2
+              else
+                echo "${http_code}"
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "GitHub API call failed after ${max_attempts} attempts" >&2
+                echo "${http_code}"
+                return 0
+              fi
+              echo "Retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
+
           REPO="$(params.repo)"
           SOURCE="$(params.source-branch)"
           BRANCH="$(params.branch-name)"
@@ -652,14 +681,14 @@ spec:
           echo "Forking ${BRANCH} from ${SOURCE} @ ${SOURCE_SHA}"
 
           # Try to create the branch; if it already exists, force it to match.
-          HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+          HTTP_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: token ${TOKEN}" \
             -X POST "https://api.github.com/repos/${REPO}/git/refs" \
             -d "{\"ref\":\"refs/heads/${BRANCH}\",\"sha\":\"${SOURCE_SHA}\"}")
 
           if [ "${HTTP_CODE}" = "422" ]; then
             echo "Branch ${BRANCH} already exists - resetting it to ${SOURCE_SHA}"
-            PATCH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+            PATCH_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
               -H "Authorization: token ${TOKEN}" \
               -X PATCH "https://api.github.com/repos/${REPO}/git/refs/heads/${BRANCH}" \
               -d "{\"sha\":\"${SOURCE_SHA}\",\"force\":true}")
@@ -781,6 +810,28 @@ spec:
         script: |
           #!/bin/bash
           set -euo pipefail
+
+          # Retry wrapper for transient command failures (e.g. git push).
+          # Usage: retry_cmd <max> <delay> <command...>
+          retry_cmd() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local exit_code=0
+            while true; do
+              "$@" && exit_code=0 || exit_code=$?
+              if [ "${exit_code}" -eq 0 ]; then
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "Command failed after ${max_attempts} attempts: $*" >&2
+                return 1
+              fi
+              echo "Attempt ${attempt}/${max_attempts} failed, retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
 
           if [ -z "${PUSH_PIPELINE_PATH}" ] || [ -z "${OUTPUT_IMAGE}" ]; then
             echo "No push-pipeline-path or output-image given; leaving the branch's PaC file alone."
@@ -906,7 +957,7 @@ spec:
             echo "Operator build inputs already pinned; nothing to push."
           else
             git commit -m "chore(early-gate): pin operator build inputs and stage group snapshot for this run"
-            git push origin "HEAD:${BRANCH}"
+            retry_cmd 3 10 git push origin "HEAD:${BRANCH}"
             echo "Pinned output-image to ${OUTPUT_IMAGE} on ${BRANCH}"
           fi
 
@@ -917,6 +968,35 @@ spec:
         script: |
           #!/bin/bash
           set -euo pipefail
+
+          # Retry wrapper for GitHub API calls. Retries on 5xx and transient
+          # network errors; does NOT retry 4xx (auth/validation).
+          # Usage: HTTP_CODE=$(retry_github_api <max> <delay> curl ...)
+          retry_github_api() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local http_code="" curl_exit=0
+            while true; do
+              http_code=$("$@") && curl_exit=0 || curl_exit=$?
+              if [ "${curl_exit}" -ne 0 ]; then
+                echo "curl failed (exit ${curl_exit}), attempt ${attempt}/${max_attempts}" >&2
+              elif [ "${http_code}" -ge 500 ] 2>/dev/null && [ "${http_code}" -lt 600 ] 2>/dev/null; then
+                echo "GitHub API returned HTTP ${http_code}, attempt ${attempt}/${max_attempts}" >&2
+              else
+                echo "${http_code}"
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "GitHub API call failed after ${max_attempts} attempts" >&2
+                echo "${http_code}"
+                return 0
+              fi
+              echo "Retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
 
           REPO="$(params.repo)"
           BRANCH="$(params.branch-name)"
@@ -941,7 +1021,7 @@ spec:
             echo "         release from the newest rhoai-X.Y branch in ${REPO}." >&2
           fi
 
-          DISPATCH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+          DISPATCH_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: token ${TOKEN}" \
             -X POST "https://api.github.com/repos/${REPO}/actions/workflows/operator-processor.yaml/dispatches" \
             -d "{\"ref\":\"${BRANCH}\",\"inputs\":{${INPUTS}}}")
@@ -1266,6 +1346,28 @@ spec:
           #!/bin/bash
           set -euo pipefail
 
+          # Retry wrapper for transient command failures (e.g. git push).
+          # Usage: retry_cmd <max> <delay> <command...>
+          retry_cmd() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local exit_code=0
+            while true; do
+              "$@" && exit_code=0 || exit_code=$?
+              if [ "${exit_code}" -eq 0 ]; then
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "Command failed after ${max_attempts} attempts: $*" >&2
+                return 1
+              fi
+              echo "Attempt ${attempt}/${max_attempts} failed, retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
+
           case "${BRANCH}" in
             eg-*) ;;
             *) echo "Refusing to write to '${BRANCH}': only eg-* branches (DR-1)." >&2; exit 1 ;;
@@ -1383,7 +1485,7 @@ spec:
           else
             # chore(): must NOT match the eg push CEL (which requires an early-gate: subject)
             git commit -m "chore(early-gate): pin bundle inputs and overlay workflow for this run"
-            git push origin "HEAD:${BRANCH}"
+            retry_cmd 3 10 git push origin "HEAD:${BRANCH}"
           fi
           rm -f /tmp/.git-credentials
 
@@ -1392,6 +1494,36 @@ spec:
         script: |
           #!/bin/bash
           set -euo pipefail
+
+          # Retry wrapper for GitHub API calls. Retries on 5xx and transient
+          # network errors; does NOT retry 4xx (auth/validation).
+          # Usage: HTTP_CODE=$(retry_github_api <max> <delay> curl ...)
+          retry_github_api() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local http_code="" curl_exit=0
+            while true; do
+              http_code=$("$@") && curl_exit=0 || curl_exit=$?
+              if [ "${curl_exit}" -ne 0 ]; then
+                echo "curl failed (exit ${curl_exit}), attempt ${attempt}/${max_attempts}" >&2
+              elif [ "${http_code}" -ge 500 ] 2>/dev/null && [ "${http_code}" -lt 600 ] 2>/dev/null; then
+                echo "GitHub API returned HTTP ${http_code}, attempt ${attempt}/${max_attempts}" >&2
+              else
+                echo "${http_code}"
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "GitHub API call failed after ${max_attempts} attempts" >&2
+                echo "${http_code}"
+                return 0
+              fi
+              echo "Retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
+
           REPO="$(params.repo)"
           BRANCH="$(params.branch-name)"
           WORKFLOW_FILE="$(params.workflow-file)"
@@ -1410,7 +1542,7 @@ spec:
             INPUTS="${INPUTS},\"rhoai_version\":\"rhoai-${RHOAI_VERSION}\""
           fi
 
-          DISPATCH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+          DISPATCH_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: token ${TOKEN}" \
             -X POST "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches" \
             -d "{\"ref\":\"${BRANCH}\",\"inputs\":{${INPUTS}}}")
@@ -1642,6 +1774,28 @@ spec:
           #!/bin/bash
           set -euo pipefail
 
+          # Retry wrapper for transient command failures (e.g. git push).
+          # Usage: retry_cmd <max> <delay> <command...>
+          retry_cmd() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local exit_code=0
+            while true; do
+              "$@" && exit_code=0 || exit_code=$?
+              if [ "${exit_code}" -eq 0 ]; then
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "Command failed after ${max_attempts} attempts: $*" >&2
+                return 1
+              fi
+              echo "Attempt ${attempt}/${max_attempts} failed, retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
+
           case "${BRANCH}" in
             eg-*) ;;
             *) echo "Refusing to write to '${BRANCH}': only eg-* branches (DR-1)." >&2; exit 1 ;;
@@ -1756,7 +1910,7 @@ spec:
             echo "FBC inputs already pinned; nothing to push."
           else
             git commit -m "chore(early-gate): pin FBC inputs and overlay workflow for this run"
-            git push origin "HEAD:${BRANCH}"
+            retry_cmd 3 10 git push origin "HEAD:${BRANCH}"
           fi
           rm -f /tmp/.git-credentials
 
@@ -1765,6 +1919,36 @@ spec:
         script: |
           #!/bin/bash
           set -euo pipefail
+
+          # Retry wrapper for GitHub API calls. Retries on 5xx and transient
+          # network errors; does NOT retry 4xx (auth/validation).
+          # Usage: HTTP_CODE=$(retry_github_api <max> <delay> curl ...)
+          retry_github_api() {
+            local max_attempts=${1}; shift
+            local delay=${1}; shift
+            local attempt=1
+            local http_code="" curl_exit=0
+            while true; do
+              http_code=$("$@") && curl_exit=0 || curl_exit=$?
+              if [ "${curl_exit}" -ne 0 ]; then
+                echo "curl failed (exit ${curl_exit}), attempt ${attempt}/${max_attempts}" >&2
+              elif [ "${http_code}" -ge 500 ] 2>/dev/null && [ "${http_code}" -lt 600 ] 2>/dev/null; then
+                echo "GitHub API returned HTTP ${http_code}, attempt ${attempt}/${max_attempts}" >&2
+              else
+                echo "${http_code}"
+                return 0
+              fi
+              if [ "${attempt}" -ge "${max_attempts}" ]; then
+                echo "GitHub API call failed after ${max_attempts} attempts" >&2
+                echo "${http_code}"
+                return 0
+              fi
+              echo "Retrying in ${delay}s..." >&2
+              sleep "${delay}"
+              attempt=$((attempt + 1))
+            done
+          }
+
           REPO="$(params.repo)"
           BRANCH="$(params.branch-name)"
           WORKFLOW_FILE="$(params.workflow-file)"
@@ -1782,7 +1966,7 @@ spec:
             INPUTS="${INPUTS},\"rhoai_version\":\"rhoai-${RHOAI_VERSION}\""
           fi
 
-          DISPATCH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+          DISPATCH_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
             -H "Authorization: token ${TOKEN}" \
             -X POST "https://api.github.com/repos/${REPO}/actions/workflows/${WORKFLOW_FILE}/dispatches" \
             -d "{\"ref\":\"${BRANCH}\",\"inputs\":{${INPUTS}}}")

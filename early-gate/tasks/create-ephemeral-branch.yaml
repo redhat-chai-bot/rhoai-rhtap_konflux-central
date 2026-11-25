@@ -29,6 +29,35 @@ spec:
       #!/bin/bash
       set -euo pipefail
 
+      # Retry wrapper for GitHub API calls. Retries on 5xx and transient
+      # network errors; does NOT retry 4xx (auth/validation).
+      # Usage: HTTP_CODE=$(retry_github_api <max> <delay> curl ...)
+      retry_github_api() {
+        local max_attempts=${1}; shift
+        local delay=${1}; shift
+        local attempt=1
+        local http_code="" curl_exit=0
+        while true; do
+          http_code=$("$@") && curl_exit=0 || curl_exit=$?
+          if [ "${curl_exit}" -ne 0 ]; then
+            echo "curl failed (exit ${curl_exit}), attempt ${attempt}/${max_attempts}" >&2
+          elif [ "${http_code}" -ge 500 ] 2>/dev/null && [ "${http_code}" -lt 600 ] 2>/dev/null; then
+            echo "GitHub API returned HTTP ${http_code}, attempt ${attempt}/${max_attempts}" >&2
+          else
+            echo "${http_code}"
+            return 0
+          fi
+          if [ "${attempt}" -ge "${max_attempts}" ]; then
+            echo "GitHub API call failed after ${max_attempts} attempts" >&2
+            echo "${http_code}"
+            return 0
+          fi
+          echo "Retrying in ${delay}s..." >&2
+          sleep "${delay}"
+          attempt=$((attempt + 1))
+        done
+      }
+
       REPO="$(params.repo)"
       SOURCE_SHA="$(params.source-sha)"
       BRANCH="$(params.branch-name)"
@@ -50,7 +79,7 @@ spec:
 
       echo "Forking ${BRANCH} from ${SOURCE_SHA} in ${REPO}"
 
-      HTTP_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+      HTTP_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
         -H "Authorization: token ${TOKEN}" \
         -X POST "https://api.github.com/repos/${REPO}/git/refs" \
         -d "{\"ref\":\"refs/heads/${BRANCH}\",\"sha\":\"${SOURCE_SHA}\"}")
@@ -58,7 +87,7 @@ spec:
       # 422 is "ref already exists"; a re-run should be idempotent, so reset to the fork point
       if [ "${HTTP_CODE}" = "422" ]; then
         echo "Branch ${BRANCH} already exists - resetting it to ${SOURCE_SHA}"
-        PATCH_CODE=$(curl -sS -o /dev/null -w "%{http_code}" \
+        PATCH_CODE=$(retry_github_api 3 5 curl -sS -o /dev/null -w "%{http_code}" \
           -H "Authorization: token ${TOKEN}" \
           -X PATCH "https://api.github.com/repos/${REPO}/git/refs/heads/${BRANCH}" \
           -d "{\"sha\":\"${SOURCE_SHA}\",\"force\":true}")
